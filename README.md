@@ -66,3 +66,6 @@ uv run -m unittest
 - Keep `max_concurrency` low (e.g. 3–5) to avoid overloading target sites.
 - Use `max_pages` on large sites so the crawl can finish.
 - `report.json` is generated output and is gitignored.
+
+
+
