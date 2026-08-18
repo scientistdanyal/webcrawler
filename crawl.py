@@ -5,7 +5,11 @@ from typing import TypedDict
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
+import cloudscraper
 from bs4 import BeautifulSoup, Tag
+
+from modules.email_extractor import extract_emails_from_html
+from modules.proxies import load_proxies
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -16,10 +20,7 @@ DEFAULT_USER_AGENT = (
 
 class PageData(TypedDict):
     url: str
-    heading: str
-    first_paragraph: str
-    outgoing_links: list[str]
-    image_urls: list[str]
+    emails: list[str]
 
 
 def normalize_url(url: str) -> str:
@@ -88,16 +89,48 @@ def get_images_from_html(html: str, base_url: str) -> list[str]:
 def extract_page_data(html: str, page_url: str) -> PageData:
     return {
         "url": page_url,
-        "heading": get_heading_from_html(html),
-        "first_paragraph": get_first_paragraph_from_html(html),
-        "outgoing_links": get_urls_from_html(html, page_url),
-        "image_urls": get_images_from_html(html, page_url),
+        "emails": extract_emails_from_html(html),
     }
+
+
+def _default_headers() -> dict[str, str]:
+    return {
+        "User-Agent": os.getenv("USER_AGENT", DEFAULT_USER_AGENT),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+
+def _fetch_with_cloudscraper(url: str, proxy: str | None = None) -> str | None:
+    scraper = cloudscraper.create_scraper()
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    try:
+        response = scraper.get(
+            url, headers=_default_headers(), proxies=proxies, timeout=30
+        )
+        if response.status_code > 399:
+            print(f"Error: HTTP {response.status_code} for {url} (cloudscraper)")
+            return None
+        content_type = response.headers.get("content-type", "")
+        if "text/html" not in content_type:
+            print(f"Error: Non-HTML content {content_type} for {url}")
+            return None
+        return response.text
+    except Exception as e:
+        print(f"Error fetching {url} with cloudscraper: {e}")
+        return None
 
 
 class AsyncCrawler:
     def __init__(
-        self, base_url: str, max_concurrency: int, max_pages: int
+        self,
+        base_url: str,
+        max_concurrency: int,
+        max_pages: int,
+        proxies: list[str] | None = None,
     ) -> None:
         self.base_url = base_url
         self.base_domain = urlsplit(base_url).netloc
@@ -109,6 +142,7 @@ class AsyncCrawler:
         self.all_tasks: set[asyncio.Task[None]] = set()
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.session: aiohttp.ClientSession | None = None
+        self.proxies = proxies if proxies is not None else load_proxies()
 
     async def __aenter__(self) -> "AsyncCrawler":
         self.session = aiohttp.ClientSession()
@@ -137,19 +171,11 @@ class AsyncCrawler:
                 return False
             return True
 
-    async def get_html(self, url: str) -> str | None:
+    async def _fetch_aiohttp(self, url: str) -> str | None:
         if self.session is None:
             return None
         try:
-            headers = {
-                "User-Agent": os.getenv("USER_AGENT", DEFAULT_USER_AGENT),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-            }
-            async with self.session.get(url, headers=headers) as response:
+            async with self.session.get(url, headers=_default_headers()) as response:
                 if response.status > 399:
                     print(f"Error: HTTP {response.status} for {url}")
                     return None
@@ -163,6 +189,24 @@ class AsyncCrawler:
         except Exception as e:
             print(f"Error fetching {url}: {e}")
             return None
+
+    async def get_html(self, url: str) -> str | None:
+        html = await self._fetch_aiohttp(url)
+        if html is not None:
+            return html
+
+        print(f"Retrying with cloudscraper: {url}")
+        html = await asyncio.to_thread(_fetch_with_cloudscraper, url)
+        if html is not None:
+            return html
+
+        for proxy in self.proxies:
+            print(f"Retrying with proxy {proxy}: {url}")
+            html = await asyncio.to_thread(_fetch_with_cloudscraper, url, proxy)
+            if html is not None:
+                return html
+
+        return None
 
     async def crawl_page(self, current_url: str) -> None:
         if self.should_stop:
@@ -211,7 +255,12 @@ class AsyncCrawler:
 
 
 async def crawl_site_async(
-    base_url: str, max_concurrency: int, max_pages: int
+    base_url: str,
+    max_concurrency: int,
+    max_pages: int,
+    proxies: list[str] | None = None,
 ) -> dict[str, PageData]:
-    async with AsyncCrawler(base_url, max_concurrency, max_pages) as crawler:
+    async with AsyncCrawler(
+        base_url, max_concurrency, max_pages, proxies=proxies
+    ) as crawler:
         return await crawler.crawl()

@@ -14,4 +14,14 @@ wheels/
 
 # Generated crawl output
 report.json
+emails.json
+tracking.json
 *.csv
+
+# Local data / proxies (keep examples committed)
+ip_list.txt
+*.xlsx
+
+# Keep templates
+!ip_list.txt.example
+!.env.example

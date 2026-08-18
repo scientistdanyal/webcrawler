@@ -1,0 +1,5 @@
+# One proxy per line. Used as last-resort fetch fallback.
+# Examples:
+# 1.2.3.4:8080
+# http://1.2.3.4:8080
+# http://user:pass@1.2.3.4:8080
