@@ -37,6 +37,10 @@ class TestCrawl(unittest.TestCase):
         expected = "crawler-test.com/path"
         self.assertEqual(actual, expected)
 
+    def test_normalize_url_strips_www_and_fragment(self) -> None:
+        actual = normalize_url("https://www.Crawler-Test.com/path/#section")
+        self.assertEqual(actual, "crawler-test.com/path")
+
     def test_get_heading_from_html_basic(self) -> None:
         input_body = "<html><body><h1>Test Title</h1></body></html>"
         actual = get_heading_from_html(input_body)
@@ -100,6 +104,24 @@ class TestCrawl(unittest.TestCase):
         actual = get_urls_from_html(input_body, input_url)
         expected = ["https://crawler-test.com/path/one", "https://other.com/path/one"]
         self.assertEqual(actual, expected)
+
+    def test_get_urls_from_html_dedupes_and_finds_embedded(self) -> None:
+        input_url = "https://crawler-test.com/home"
+        input_body = """
+        <html><body>
+          <a href="/contact">Contact</a>
+          <a href="/contact/">Contact again</a>
+          <a href="https://www.crawler-test.com/contact#form">Contact www</a>
+          <p>Also see https://crawler-test.com/about-us for more</p>
+        </body></html>
+        """
+        actual = get_urls_from_html(input_body, input_url)
+        norms = {normalize_url(u) for u in actual}
+        self.assertIn("crawler-test.com/contact", norms)
+        self.assertIn("crawler-test.com/about-us", norms)
+        self.assertEqual(
+            len([n for n in norms if n == "crawler-test.com/contact"]), 1
+        )
 
     def test_get_images_from_html_absolute(self) -> None:
         input_url = "https://crawler-test.com"

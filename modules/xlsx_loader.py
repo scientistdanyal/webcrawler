@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from openpyxl import load_workbook
 
@@ -11,6 +12,22 @@ class BranchRow:
     name: str
     website: str
     sheet_email: str | None
+
+
+def prefer_https(url: str) -> str:
+    """Normalize website URLs to https:// (upgrade http and bare domains)."""
+    cleaned = url.strip()
+    if not cleaned:
+        return cleaned
+    if not cleaned.startswith(("http://", "https://")):
+        cleaned = f"https://{cleaned}"
+    elif cleaned.startswith("http://"):
+        cleaned = "https://" + cleaned[len("http://") :]
+
+    parts = urlsplit(cleaned)
+    return urlunsplit(
+        ("https", parts.netloc, parts.path or "", parts.query, parts.fragment)
+    )
 
 
 def load_branches_from_xlsx(path: str | Path) -> list[BranchRow]:
@@ -49,8 +66,7 @@ def load_branches_from_xlsx(path: str | Path) -> list[BranchRow]:
         website_str = str(website).strip()
         if not website_str:
             continue
-        if not website_str.startswith(("http://", "https://")):
-            website_str = f"http://{website_str}"
+        website_str = prefer_https(website_str)
 
         sheet_email = None
         if email_idx is not None and row[email_idx]:

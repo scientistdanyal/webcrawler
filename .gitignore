@@ -25,3 +25,6 @@ ip_list.txt
 # Keep templates
 !ip_list.txt.example
 !.env.example
+*.pdf
+
+*.txt

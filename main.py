@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 from crawl import crawl_site_async
 from json_report import write_json_report
 from modules.email_store import EmailStore
-from modules.proxies import load_proxies
+from modules.human_crawler import crawl_site_human_async
 from modules.tracker import CrawlTracker
-from modules.xlsx_loader import BranchRow, load_branches_from_xlsx
+from modules.xlsx_loader import BranchRow, load_branches_from_xlsx, prefer_https
 
 load_dotenv()
 
@@ -25,34 +25,50 @@ def collect_emails(page_data: dict, sheet_email: str | None = None) -> list[str]
     return sorted(emails)
 
 
+async def crawl_with_mode(
+    url: str,
+    *,
+    crawler_mode: str,
+    max_concurrency: int,
+    max_pages: int,
+) -> dict:
+    url = prefer_https(url)
+    if crawler_mode == "humanize":
+        print(f"Using humanize crawler (visible browser, headless=False) for {url}")
+        return await crawl_site_human_async(url, max_pages)
+    print(f"Using bot crawler for {url}")
+    return await crawl_site_async(url, max_concurrency, max_pages)
+
+
 async def process_branch(
     branch: BranchRow,
     *,
+    crawler_mode: str,
     max_concurrency: int,
     max_pages: int,
     email_store: EmailStore,
     tracker: CrawlTracker,
-    proxies: list[str],
     force: bool = False,
 ) -> None:
-    if not force and tracker.is_done(branch.website):
+    if not force and tracker.is_done(prefer_https(branch.website)):
         print(f"Skipping (already done): {branch.name}")
         return
 
     print(f"\n=== {branch.name} ===")
-    print(f"Crawling: {branch.website}")
+    website = prefer_https(branch.website)
+    print(f"Crawling: {website}")
 
     try:
-        page_data = await crawl_site_async(
-            branch.website,
-            max_concurrency,
-            max_pages,
-            proxies=proxies,
+        page_data = await crawl_with_mode(
+            website,
+            crawler_mode=crawler_mode,
+            max_concurrency=max_concurrency,
+            max_pages=max_pages,
         )
         emails = collect_emails(page_data, branch.sheet_email)
         merged = email_store.append(branch.name, emails)
         tracker.mark(
-            branch.website,
+            website,
             name=branch.name,
             status="done",
             emails_found=len(merged),
@@ -60,7 +76,7 @@ async def process_branch(
         print(f"Saved {len(merged)} email(s) for {branch.name}")
     except Exception as e:
         tracker.mark(
-            branch.website,
+            website,
             name=branch.name,
             status="failed",
             error=str(e),
@@ -72,10 +88,9 @@ async def run_batch(args: argparse.Namespace) -> None:
     branches = load_branches_from_xlsx(args.xlsx)
     email_store = EmailStore(args.emails_out)
     tracker = CrawlTracker(args.tracking)
-    proxies = load_proxies(args.proxy_file)
 
     print(f"Loaded {len(branches)} branches with websites")
-    print(f"Proxies available: {len(proxies)}")
+    print(f"Crawler mode: {args.crawler}")
 
     if args.limit is not None:
         branches = branches[: args.limit]
@@ -83,11 +98,11 @@ async def run_batch(args: argparse.Namespace) -> None:
     for branch in branches:
         await process_branch(
             branch,
+            crawler_mode=args.crawler,
             max_concurrency=args.concurrency,
             max_pages=args.max_pages,
             email_store=email_store,
             tracker=tracker,
-            proxies=proxies,
             force=False,
         )
 
@@ -96,7 +111,6 @@ async def run_redo(args: argparse.Namespace) -> None:
     branches = load_branches_from_xlsx(args.xlsx)
     email_store = EmailStore(args.emails_out)
     tracker = CrawlTracker(args.tracking)
-    proxies = load_proxies(args.proxy_file)
 
     query = args.redo.strip()
     match = next(
@@ -119,20 +133,22 @@ async def run_redo(args: argparse.Namespace) -> None:
     tracker.clear(match.website)
     await process_branch(
         match,
+        crawler_mode=args.crawler,
         max_concurrency=args.concurrency,
         max_pages=args.max_pages,
         email_store=email_store,
         tracker=tracker,
-        proxies=proxies,
         force=True,
     )
 
 
 async def run_single(args: argparse.Namespace) -> None:
-    proxies = load_proxies(args.proxy_file)
-    print(f"Starting async crawl of: {args.url}")
-    page_data = await crawl_site_async(
-        args.url, args.concurrency, args.max_pages, proxies=proxies
+    print(f"Starting crawl of: {args.url}")
+    page_data = await crawl_with_mode(
+        args.url,
+        crawler_mode=args.crawler,
+        max_concurrency=args.concurrency,
+        max_pages=args.max_pages,
     )
     write_json_report(page_data, args.report_out)
     print(f"Wrote {args.report_out}")
@@ -165,10 +181,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to XLSX with Website + Branch/Association Name columns",
     )
     parser.add_argument(
+        "--crawler",
+        choices=("bot", "humanize"),
+        default="bot",
+        help="Crawler mode: bot (fast async HTTP) or humanize (visible browser, headless=False)",
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=3,
-        help="Max concurrent page fetches (default: 3)",
+        help="Max concurrent page fetches for bot mode (default: 3)",
     )
     parser.add_argument(
         "--max-pages",
@@ -185,11 +207,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--tracking",
         default="tracking.json",
         help="Tracking file for completed/failed URLs (default: tracking.json)",
-    )
-    parser.add_argument(
-        "--proxy-file",
-        default="ip_list.txt",
-        help="Proxy list file used after cloudscraper fails (default: ip_list.txt)",
     )
     parser.add_argument(
         "--report-out",
@@ -239,9 +256,10 @@ async def async_main() -> None:
     parser.print_help()
     print(
         "\nExamples:\n"
-        "  uv run main.py --batch --concurrency 3 --max-pages 10\n"
-        "  uv run main.py --redo 'Camp Cosby Family Branch' --max-pages 10\n"
-        "  uv run main.py https://example.com 3 10\n"
+        "  uv run main.py --batch --crawler bot --concurrency 3 --max-pages 10\n"
+        "  uv run main.py --batch --crawler humanize --max-pages 10 --limit 5\n"
+        "  uv run main.py --redo 'Camp Cosby Family Branch' --crawler humanize\n"
+        "  uv run main.py https://example.com 3 10 --crawler bot\n"
     )
     sys.exit(1)
 

@@ -7,8 +7,15 @@ requires-python = ">=3.13"
 dependencies = [
     "aiohttp==3.12.12",
     "beautifulsoup4==4.13.4",
+    "browserforge>=1.2.4",
     "cloudscraper>=1.2.71",
+    "curl-cffi>=0.16.0",
+    "msgspec>=0.21.1",
     "openpyxl>=3.1.5",
+    "patchright>=1.62.1",
+    "playwright>=1.62.0",
+    "pypdf>=6.16.1",
     "python-dotenv>=1.2.2",
     "requests==2.32.4",
+    "scrapling>=0.4.14",
 ]
