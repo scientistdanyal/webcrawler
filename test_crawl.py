@@ -208,12 +208,23 @@ class TestCrawl(unittest.TestCase):
             self.assertFalse(tracker.is_done("http://example.com"))
 
     def test_detect_captcha_cloudflare(self) -> None:
-        html = "<html><title>Just a moment...</title><div id='cf-challenge'></div></html>"
+        html = "<html><title>Just a moment...</title><div id='cf-challenge-running'></div><script src='cdn-cgi/challenge-platform/x.js'></script></html>"
         self.assertEqual(detect_captcha_type(html), "cloudflare")
         self.assertEqual(wait_seconds_for_captcha("cloudflare"), 20)
 
+    def test_detect_captcha_ignores_normal_cloudflare_cdn(self) -> None:
+        # Normal sites often include data-cfasync / cloudflare CDN without a challenge
+        html = """
+        <html><head><title>Brewton Area YMCA</title></head>
+        <body data-cfasync="false">
+          <h1>Home</h1>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+        </body></html>
+        """
+        self.assertIsNone(detect_captcha_type(html))
+
     def test_detect_captcha_recaptcha(self) -> None:
-        html = '<html><script src="https://www.google.com/recaptcha/api.js"></script></html>'
+        html = '<html><script src="https://www.google.com/recaptcha/api.js"></script><div class="g-recaptcha"></div></html>'
         self.assertEqual(detect_captcha_type(html), "recaptcha")
         self.assertEqual(wait_seconds_for_captcha("recaptcha"), 10)
 

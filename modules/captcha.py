@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,103 +14,93 @@ def wait_seconds_for_captcha(captcha_type: str) -> int:
         return CLOUDFLARE_WAIT_SECONDS
     return CAPTCHA_WAIT_SECONDS
 
-# Order matters: more specific checks first
-CAPTCHA_SIGNATURES: list[tuple[str, tuple[str, ...]]] = [
-    (
-        "cloudflare",
-        (
-            "cf-browser-verification",
-            "cf-challenge",
-            "cf-turnstile",
-            "challenges.cloudflare.com",
-            "cdn-cgi/challenge-platform",
-            "attention required! | cloudflare",
-            "checking your browser before accessing",
-            "just a moment...",
-            "cf-please-wait",
-            "data-cfasync",
-            "_cf_chl",
-        ),
-    ),
+
+# Strict challenge-only signatures (avoid CDN footprints like data-cfasync)
+CLOUDFLARE_CHALLENGE_PATTERNS = (
+    r"cdn-cgi/challenge-platform",
+    r"challenges\.cloudflare\.com",
+    r"cf-browser-verification",
+    r"id=[\"']challenge-form[\"']",
+    r"checking your browser before accessing",
+    r"attention required!\s*\|\s*cloudflare",
+    r"<title[^>]*>\s*just a moment\.\.\.\s*</title>",
+    r"cf-please-wait",
+    r"_cf_chl_opt",
+    r"cf-turnstile-response",
+    r"managed_challenge",
+    r"cf-challenge-running",
+)
+
+OTHER_CAPTCHA_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     (
         "recaptcha",
         (
-            "google.com/recaptcha",
-            "recaptcha/api",
-            "g-recaptcha",
-            "grecaptcha",
-            "recaptcha-checkbox",
+            r"google\.com/recaptcha",
+            r"g-recaptcha",
+            r"grecaptcha\.execute",
         ),
     ),
     (
         "hcaptcha",
         (
-            "hcaptcha.com",
-            "h-captcha",
-            "hcaptcha-box",
+            r"hcaptcha\.com/1/api",
+            r"h-captcha",
         ),
     ),
     (
         "funcaptcha",
         (
-            "funcaptcha",
-            "arkoselabs",
-            "arkose",
+            r"funcaptcha",
+            r"arkoselabs\.com",
         ),
     ),
     (
         "datadome",
         (
-            "datadome",
-            "captcha-delivery.com",
+            r"captcha-delivery\.com",
+            r"datadome\.co/captcha",
         ),
     ),
     (
         "perimeterx",
         (
-            "perimeterx",
-            "px-captcha",
-            "human challenge",
-        ),
-    ),
-    (
-        "akamai",
-        (
-            "akamai",
-            "ak-challenge",
-            "_abck",
-        ),
-    ),
-    (
-        "aws_waf",
-        (
-            "aws-waf",
-            "awswaf",
-            "amazon web services",
-        ),
-    ),
-    (
-        "generic_captcha",
-        (
-            "verify you are human",
-            "are you a robot",
-            "complete the captcha",
-            "solve the captcha",
-            "captcha",
-            "bot detection",
+            r"px-captcha",
+            r"perimeterx\.net/.*captcha",
         ),
     ),
 ]
 
 
 def detect_captcha_type(html: str) -> str | None:
-    """Return captcha vendor/type if page HTML looks like a challenge."""
+    """Return captcha type only for real challenge pages (not normal CF-CDN sites)."""
     if not html:
         return None
     lowered = html.lower()
-    for captcha_type, needles in CAPTCHA_SIGNATURES:
-        if any(needle in lowered for needle in needles):
+
+    # Cloudflare: require challenge markers, not generic CF CDN attrs
+    for pattern in CLOUDFLARE_CHALLENGE_PATTERNS:
+        if re.search(pattern, lowered):
+            return "cloudflare"
+
+    # Small challenge pages often have almost no real content
+    # (keep as secondary CF signal with title)
+    if (
+        "<title>just a moment...</title>" in lowered
+        or "enable javascript and cookies to continue" in lowered
+    ) and ("cloudflare" in lowered or "cf-" in lowered):
+        return "cloudflare"
+
+    for captcha_type, patterns in OTHER_CAPTCHA_PATTERNS:
+        if any(re.search(pattern, lowered) for pattern in patterns):
             return captcha_type
+
+    # Explicit human-verification phrases only (not bare word "captcha")
+    if re.search(
+        r"verify you are human|are you a robot|complete the security check",
+        lowered,
+    ):
+        return "generic_captcha"
+
     return None
 
 
@@ -132,7 +123,9 @@ def log_captcha(
     with file_path.open("a", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         if write_header:
-            writer.writerow(["timestamp", "branch", "url", "captcha_type", "wait_seconds"])
+            writer.writerow(
+                ["timestamp", "branch", "url", "captcha_type", "wait_seconds"]
+            )
         writer.writerow(
             [
                 datetime.now(timezone.utc).isoformat(),

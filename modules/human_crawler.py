@@ -1,7 +1,8 @@
 """Humanize crawler using nodriver (undetected Chrome, no chromedriver/Selenium).
 
 Docs: https://ultrafunkamsterdam.github.io/nodriver/
-Opens a real Chrome window (headless=False). Waits only on captcha / block.
+Opens a real Chrome window (headless=False).
+Fast by default — waits only when a real Cloudflare/captcha challenge is present.
 """
 
 from __future__ import annotations
@@ -54,20 +55,17 @@ class HumanCrawler:
         max_pages: int,
         *,
         branch_name: str = "",
-        block_wait: float = 5.0,
         headless: bool = False,
     ) -> None:
         self.base_url = base_url
         self.base_domain = urlsplit(base_url).netloc
         self.max_pages = max_pages
         self.branch_name = branch_name or base_url
-        self.block_wait = block_wait
         self.headless = headless
         self.page_data: dict[str, PageData] = {}
         self.visited: set[str] = set()
 
     async def _get_html(self, tab: uc.Tab) -> str:
-        # Prefer full document HTML
         try:
             html = await tab.get_content()
             if isinstance(html, str) and html.strip():
@@ -86,6 +84,7 @@ class HumanCrawler:
         captcha_type = detect_captcha_type(html)
         if captcha_type is None:
             return html
+
         wait_s = wait_seconds_for_captcha(captcha_type)
         log_captcha(
             branch=self.branch_name,
@@ -96,25 +95,18 @@ class HumanCrawler:
         await asyncio.sleep(wait_s)
         return await self._get_html(tab)
 
-    async def _goto(self, browser: uc.Browser, tab: uc.Tab | None, url: str) -> tuple[uc.Tab | None, str | None]:
+    async def _goto(
+        self, browser: uc.Browser, tab: uc.Tab | None, url: str
+    ) -> tuple[uc.Tab | None, str | None]:
         try:
             if tab is None:
                 tab = await browser.get(url)
             else:
                 tab = await tab.get(url)
 
-            # Give the page a brief moment to settle anti-bot JS
-            await browser.sleep(0.5)
             html = await self._get_html(tab)
             if not html:
                 print(f"Error: empty page content for {url}")
-                return tab, None
-
-            # Heuristic block page (Cloudflare interstitial often still 200)
-            lowered = html.lower()
-            if "access denied" in lowered and "cloudflare" in lowered:
-                print(f"Blocked page for {url}; waiting {self.block_wait}s")
-                await asyncio.sleep(self.block_wait)
                 return tab, None
 
             html = await self._maybe_wait_for_captcha(tab, url, html)
@@ -148,8 +140,7 @@ class HumanCrawler:
 
                 tab, html = await self._goto(browser, tab, current_url)
                 if html is None:
-                    print(f"Retrying after wait: {current_url}")
-                    await asyncio.sleep(self.block_wait)
+                    # Quick retry with no forced wait
                     tab, html = await self._goto(browser, tab, current_url)
                     if html is None:
                         continue
