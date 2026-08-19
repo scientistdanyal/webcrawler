@@ -340,15 +340,17 @@ class AsyncCrawler:
         if html is not None:
             return await self._handle_captcha(url, html)
 
-        if status in BLOCK_STATUSES or status is None:
-            await self._backoff(f"aiohttp failed status={status}")
+        # Only pause when the site is actively blocking/rate-limiting
+        if status in BLOCK_STATUSES:
+            await self._backoff(f"blocked status={status}")
 
         print(f"Retrying with cloudscraper: {url}")
         html, status = await asyncio.to_thread(_fetch_with_cloudscraper, url)
         if html is not None:
             return await self._handle_captcha(url, html)
 
-        await self._backoff(f"cloudscraper failed status={status}")
+        if status in BLOCK_STATUSES:
+            await self._backoff(f"cloudscraper blocked status={status}")
         return None
 
     async def crawl_page(self, current_url: str) -> None:

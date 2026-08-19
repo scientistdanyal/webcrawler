@@ -1,12 +1,11 @@
 """Human-like browser crawler with a visible window (headless=False).
 
-Uses Playwright Chromium — real browser, not headless — to reduce bot blocks.
+Fast by default — only waits when blocked or a captcha is detected.
 """
 
 from __future__ import annotations
 
 import asyncio
-import random
 from collections import deque
 from urllib.parse import urlsplit
 
@@ -36,6 +35,8 @@ PRIORITY_KEYWORDS = (
     "reach",
 )
 
+BLOCK_STATUSES = {403, 429, 503}
+
 
 def _link_priority(url: str) -> int:
     path = urlsplit(url).path.lower()
@@ -54,44 +55,17 @@ class HumanCrawler:
         max_pages: int,
         *,
         branch_name: str = "",
-        min_delay: float = 1.5,
-        max_delay: float = 4.5,
-        error_backoff: float = 5.0,
+        block_wait: float = 5.0,
         headless: bool = False,
     ) -> None:
         self.base_url = base_url
         self.base_domain = urlsplit(base_url).netloc
         self.max_pages = max_pages
         self.branch_name = branch_name or base_url
-        self.min_delay = min_delay
-        self.max_delay = max_delay
-        self.error_backoff = error_backoff
+        self.block_wait = block_wait
         self.headless = headless
         self.page_data: dict[str, PageData] = {}
         self.visited: set[str] = set()
-
-    async def _think(self) -> None:
-        if random.random() < 0.12:
-            delay = random.uniform(self.max_delay, self.max_delay + 3.0)
-        else:
-            delay = random.uniform(self.min_delay, self.max_delay)
-        print(f"  (human pause {delay:.1f}s)")
-        await asyncio.sleep(delay)
-
-    async def _human_scroll(self, page: Page) -> None:
-        """Light scroll like a person skimming the page."""
-        try:
-            for _ in range(random.randint(1, 3)):
-                await page.mouse.wheel(0, random.randint(200, 700))
-                await asyncio.sleep(random.uniform(0.3, 0.9))
-            if random.random() < 0.4:
-                await page.mouse.move(
-                    random.randint(80, 900),
-                    random.randint(80, 600),
-                    steps=random.randint(5, 15),
-                )
-        except Exception:
-            pass
 
     async def _maybe_wait_for_captcha(self, page: Page, url: str, html: str) -> str:
         captcha_type = detect_captcha_type(html)
@@ -100,7 +74,6 @@ class HumanCrawler:
 
         log_captcha(branch=self.branch_name, url=url, captcha_type=captcha_type)
         await asyncio.sleep(CAPTCHA_WAIT_SECONDS)
-        # Re-read page in case challenge resolved / user solved it
         try:
             return await page.content()
         except Exception:
@@ -108,27 +81,24 @@ class HumanCrawler:
 
     async def _goto(self, page: Page, url: str) -> str | None:
         try:
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            if response is not None and response.status in {403, 429, 503}:
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            status = response.status if response is not None else None
+
+            if status in BLOCK_STATUSES:
                 print(
-                    f"Blocked/rate-limited HTTP {response.status} for {url}; "
-                    f"sleeping {self.error_backoff}s"
+                    f"Blocked HTTP {status} for {url}; waiting {self.block_wait}s"
                 )
-                await asyncio.sleep(self.error_backoff)
-                return None
-            if response is not None and response.status > 399:
-                print(f"Error: HTTP {response.status} for {url}")
-                await asyncio.sleep(self.error_backoff)
+                await asyncio.sleep(self.block_wait)
                 return None
 
-            # Let late JS settle briefly
-            await asyncio.sleep(random.uniform(0.8, 1.8))
-            await self._human_scroll(page)
+            if status is not None and status > 399:
+                print(f"Error: HTTP {status} for {url}")
+                return None
+
             html = await page.content()
             return await self._maybe_wait_for_captcha(page, url, html)
         except Exception as e:
             print(f"Error fetching {url}: {e}")
-            await asyncio.sleep(self.error_backoff)
             return None
 
     async def _launch_browser(self, playwright) -> Browser:
@@ -174,7 +144,6 @@ class HumanCrawler:
                     "Chrome/122.0.0.0 Safari/537.36"
                 ),
             )
-            # Reduce obvious webdriver fingerprint
             await context.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             )
@@ -192,7 +161,6 @@ class HumanCrawler:
                         continue
                     self.visited.add(normalized)
 
-                    await self._think()
                     print(
                         f"[humanize/browser] Visiting {current_url} "
                         f"({len(self.visited)}/{self.max_pages})"
@@ -200,6 +168,7 @@ class HumanCrawler:
 
                     html = await self._goto(page, current_url)
                     if html is None:
+                        # One quick retry only after block wait already applied
                         html = await self._goto(page, current_url)
                         if html is None:
                             continue
@@ -232,16 +201,12 @@ async def crawl_site_human_async(
     max_pages: int,
     *,
     branch_name: str = "",
-    min_delay: float = 1.5,
-    max_delay: float = 4.5,
     headless: bool = False,
 ) -> dict[str, PageData]:
     crawler = HumanCrawler(
         base_url,
         max_pages,
         branch_name=branch_name,
-        min_delay=min_delay,
-        max_delay=max_delay,
         headless=headless,
     )
     return await crawler.crawl()
