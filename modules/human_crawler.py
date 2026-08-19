@@ -80,6 +80,44 @@ class HumanCrawler:
             pass
         return ""
 
+    async def _scroll_page(self, tab: uc.Tab) -> None:
+        """Scroll to bottom in steps so lazy-loaded DOM (emails/links) can appear."""
+        try:
+            total_height = await tab.evaluate(
+                "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+            )
+            if not isinstance(total_height, (int, float)) or total_height <= 0:
+                total_height = 3000
+
+            viewport = await tab.evaluate("window.innerHeight")
+            if not isinstance(viewport, (int, float)) or viewport <= 0:
+                viewport = 800
+
+            position = 0
+            steps = 0
+            max_steps = 25
+            while position < total_height and steps < max_steps:
+                position = min(position + int(viewport * 0.85), int(total_height))
+                await tab.evaluate(f"window.scrollTo(0, {position})")
+                await asyncio.sleep(0.25)
+                steps += 1
+                # Height can grow as lazy content loads
+                new_height = await tab.evaluate(
+                    "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+                )
+                if isinstance(new_height, (int, float)) and new_height > total_height:
+                    total_height = new_height
+
+            # Jump to absolute bottom, then brief settle for network/DOM updates
+            await tab.evaluate(
+                "window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight))"
+            )
+            await asyncio.sleep(0.6)
+            # Back to top so next navigation feels clean
+            await tab.evaluate("window.scrollTo(0, 0)")
+        except Exception as e:
+            print(f"  (scroll skipped: {e})")
+
     async def _maybe_wait_for_captcha(self, tab: uc.Tab, url: str, html: str) -> str:
         captcha_type = detect_captcha_type(html)
         if captcha_type is None:
@@ -109,7 +147,15 @@ class HumanCrawler:
                 print(f"Error: empty page content for {url}")
                 return tab, None
 
-            html = await self._maybe_wait_for_captcha(tab, url, html)
+            # Don't scroll challenge pages; wait first if Cloudflare/captcha
+            if detect_captcha_type(html) is not None:
+                html = await self._maybe_wait_for_captcha(tab, url, html)
+                if detect_captcha_type(html) is not None:
+                    return tab, html
+
+            print("  scrolling page for lazy-loaded content...")
+            await self._scroll_page(tab)
+            html = await self._get_html(tab)
             return tab, html
         except Exception as e:
             print(f"Error fetching {url}: {e}")
