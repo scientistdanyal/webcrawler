@@ -10,6 +10,7 @@ from crawl import (
 from modules.email_extractor import extract_emails_from_html
 from modules.email_store import EmailStore
 from modules.tracker import CrawlTracker
+from modules.captcha import detect_captcha_type
 
 
 class TestCrawl(unittest.TestCase):
@@ -205,6 +206,18 @@ class TestCrawl(unittest.TestCase):
             self.assertTrue(tracker.is_done("http://example.com"))
             tracker.clear("http://example.com")
             self.assertFalse(tracker.is_done("http://example.com"))
+
+    def test_detect_captcha_cloudflare(self) -> None:
+        html = "<html><title>Just a moment...</title><div id='cf-challenge'></div></html>"
+        self.assertEqual(detect_captcha_type(html), "cloudflare")
+
+    def test_detect_captcha_recaptcha(self) -> None:
+        html = '<html><script src="https://www.google.com/recaptcha/api.js"></script></html>'
+        self.assertEqual(detect_captcha_type(html), "recaptcha")
+
+    def test_detect_captcha_none(self) -> None:
+        html = "<html><body><h1>Brewton Area YMCA</h1><p>Contact us</p></body></html>"
+        self.assertIsNone(detect_captcha_type(html))
 
 
 if __name__ == "__main__":

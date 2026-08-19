@@ -19,6 +19,11 @@ from crawl import (
     is_crawlable_url,
     normalize_url,
 )
+from modules.captcha import (
+    CAPTCHA_WAIT_SECONDS,
+    detect_captcha_type,
+    log_captcha,
+)
 
 PRIORITY_KEYWORDS = (
     "contact",
@@ -48,6 +53,7 @@ class HumanCrawler:
         base_url: str,
         max_pages: int,
         *,
+        branch_name: str = "",
         min_delay: float = 1.5,
         max_delay: float = 4.5,
         error_backoff: float = 5.0,
@@ -56,6 +62,7 @@ class HumanCrawler:
         self.base_url = base_url
         self.base_domain = urlsplit(base_url).netloc
         self.max_pages = max_pages
+        self.branch_name = branch_name or base_url
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.error_backoff = error_backoff
@@ -86,6 +93,19 @@ class HumanCrawler:
         except Exception:
             pass
 
+    async def _maybe_wait_for_captcha(self, page: Page, url: str, html: str) -> str:
+        captcha_type = detect_captcha_type(html)
+        if captcha_type is None:
+            return html
+
+        log_captcha(branch=self.branch_name, url=url, captcha_type=captcha_type)
+        await asyncio.sleep(CAPTCHA_WAIT_SECONDS)
+        # Re-read page in case challenge resolved / user solved it
+        try:
+            return await page.content()
+        except Exception:
+            return html
+
     async def _goto(self, page: Page, url: str) -> str | None:
         try:
             response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -104,7 +124,8 @@ class HumanCrawler:
             # Let late JS settle briefly
             await asyncio.sleep(random.uniform(0.8, 1.8))
             await self._human_scroll(page)
-            return await page.content()
+            html = await page.content()
+            return await self._maybe_wait_for_captcha(page, url, html)
         except Exception as e:
             print(f"Error fetching {url}: {e}")
             await asyncio.sleep(self.error_backoff)
@@ -210,6 +231,7 @@ async def crawl_site_human_async(
     base_url: str,
     max_pages: int,
     *,
+    branch_name: str = "",
     min_delay: float = 1.5,
     max_delay: float = 4.5,
     headless: bool = False,
@@ -217,6 +239,7 @@ async def crawl_site_human_async(
     crawler = HumanCrawler(
         base_url,
         max_pages,
+        branch_name=branch_name,
         min_delay=min_delay,
         max_delay=max_delay,
         headless=headless,

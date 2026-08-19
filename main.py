@@ -31,13 +31,18 @@ async def crawl_with_mode(
     crawler_mode: str,
     max_concurrency: int,
     max_pages: int,
+    branch_name: str = "",
 ) -> dict:
     url = prefer_https(url)
     if crawler_mode == "humanize":
         print(f"Using humanize crawler (visible browser, headless=False) for {url}")
-        return await crawl_site_human_async(url, max_pages)
+        return await crawl_site_human_async(
+            url, max_pages, branch_name=branch_name
+        )
     print(f"Using bot crawler for {url}")
-    return await crawl_site_async(url, max_concurrency, max_pages)
+    return await crawl_site_async(
+        url, max_concurrency, max_pages, branch_name=branch_name
+    )
 
 
 async def process_branch(
@@ -64,6 +69,7 @@ async def process_branch(
             crawler_mode=crawler_mode,
             max_concurrency=max_concurrency,
             max_pages=max_pages,
+            branch_name=branch.name,
         )
         emails = collect_emails(page_data, branch.sheet_email)
         merged = email_store.append(branch.name, emails)
@@ -149,6 +155,7 @@ async def run_single(args: argparse.Namespace) -> None:
         crawler_mode=args.crawler,
         max_concurrency=args.concurrency,
         max_pages=args.max_pages,
+        branch_name=prefer_https(args.url),
     )
     write_json_report(page_data, args.report_out)
     print(f"Wrote {args.report_out}")

@@ -16,6 +16,7 @@ wheels/
 report.json
 emails.json
 tracking.json
+captcha_log.csv
 *.csv
 
 # Local data / proxies (keep examples committed)

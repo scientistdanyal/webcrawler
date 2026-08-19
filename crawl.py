@@ -10,6 +10,11 @@ import cloudscraper
 from bs4 import BeautifulSoup, Tag
 
 from modules.email_extractor import extract_emails_from_html
+from modules.captcha import (
+    CAPTCHA_WAIT_SECONDS,
+    detect_captcha_type,
+    log_captcha,
+)
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -252,6 +257,8 @@ class AsyncCrawler:
         base_url: str,
         max_concurrency: int,
         max_pages: int,
+        *,
+        branch_name: str = "",
     ) -> None:
         self.base_url = base_url
         self.base_domain = urlsplit(base_url).netloc
@@ -264,6 +271,7 @@ class AsyncCrawler:
         self.all_tasks: set[asyncio.Task[None]] = set()
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.session: aiohttp.ClientSession | None = None
+        self.branch_name = branch_name or base_url
 
     async def __aenter__(self) -> "AsyncCrawler":
         self.session = aiohttp.ClientSession()
@@ -298,6 +306,14 @@ class AsyncCrawler:
         print(f"Backing off {ERROR_BACKOFF_SECONDS}s ({reason})")
         await asyncio.sleep(ERROR_BACKOFF_SECONDS)
 
+    async def _handle_captcha(self, url: str, html: str) -> str | None:
+        captcha_type = detect_captcha_type(html)
+        if captcha_type is None:
+            return html
+        log_captcha(branch=self.branch_name, url=url, captcha_type=captcha_type)
+        await asyncio.sleep(CAPTCHA_WAIT_SECONDS)
+        return html
+
     async def _fetch_aiohttp(self, url: str) -> tuple[str | None, int | None]:
         if self.session is None:
             return None, None
@@ -322,7 +338,7 @@ class AsyncCrawler:
     async def get_html(self, url: str) -> str | None:
         html, status = await self._fetch_aiohttp(url)
         if html is not None:
-            return html
+            return await self._handle_captcha(url, html)
 
         if status in BLOCK_STATUSES or status is None:
             await self._backoff(f"aiohttp failed status={status}")
@@ -330,7 +346,7 @@ class AsyncCrawler:
         print(f"Retrying with cloudscraper: {url}")
         html, status = await asyncio.to_thread(_fetch_with_cloudscraper, url)
         if html is not None:
-            return html
+            return await self._handle_captcha(url, html)
 
         await self._backoff(f"cloudscraper failed status={status}")
         return None
@@ -405,6 +421,10 @@ async def crawl_site_async(
     base_url: str,
     max_concurrency: int,
     max_pages: int,
+    *,
+    branch_name: str = "",
 ) -> dict[str, PageData]:
-    async with AsyncCrawler(base_url, max_concurrency, max_pages) as crawler:
+    async with AsyncCrawler(
+        base_url, max_concurrency, max_pages, branch_name=branch_name
+    ) as crawler:
         return await crawler.crawl()
