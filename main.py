@@ -35,7 +35,7 @@ async def crawl_with_mode(
 ) -> dict:
     url = prefer_https(url)
     if crawler_mode == "humanize":
-        print(f"Using humanize crawler (visible browser, headless=False) for {url}")
+        print(f"Using humanize crawler (no driver) for {url}")
         return await crawl_site_human_async(
             url, max_pages, branch_name=branch_name
         )
@@ -191,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--crawler",
         choices=("bot", "humanize"),
         default="bot",
-        help="Crawler mode: bot (fast async HTTP) or humanize (visible browser, headless=False)",
+        help="Crawler mode: bot (fast async HTTP) or humanize (no-driver cloudscraper)",
     )
     parser.add_argument(
         "--concurrency",

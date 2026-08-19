@@ -1,15 +1,17 @@
-"""Human-like browser crawler with a visible window (headless=False).
+"""Human-like crawler with NO browser driver.
 
-Fast by default — only waits when blocked or a captcha is detected.
+Uses cloudscraper/requests sessions only — realistic headers, cookies, referers.
+Waits only on captcha / HTTP block (403/429/503).
 """
 
 from __future__ import annotations
 
 import asyncio
+import random
 from collections import deque
 from urllib.parse import urlsplit
 
-from playwright.async_api import Browser, Page, async_playwright
+import cloudscraper
 
 from crawl import (
     PageData,
@@ -24,6 +26,8 @@ from modules.captcha import (
     log_captcha,
 )
 
+BLOCK_STATUSES = {403, 429, 503}
+
 PRIORITY_KEYWORDS = (
     "contact",
     "about",
@@ -35,7 +39,18 @@ PRIORITY_KEYWORDS = (
     "reach",
 )
 
-BLOCK_STATUSES = {403, 429, 503}
+USER_AGENTS = [
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/121.0.0.0 Safari/537.36"
+    ),
+]
 
 
 def _link_priority(url: str) -> int:
@@ -46,8 +61,28 @@ def _link_priority(url: str) -> int:
     return len(PRIORITY_KEYWORDS) + 1
 
 
+def _headers(user_agent: str, referer: str | None = None) -> dict[str, str]:
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none" if referer is None else "same-origin",
+        "Sec-Fetch-User": "?1",
+    }
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
+
 class HumanCrawler:
-    """Sequential crawler in a real visible browser (headless=False)."""
+    """Sequential no-driver crawler (cloudscraper session only)."""
 
     def __init__(
         self,
@@ -56,142 +91,98 @@ class HumanCrawler:
         *,
         branch_name: str = "",
         block_wait: float = 5.0,
-        headless: bool = False,
     ) -> None:
         self.base_url = base_url
         self.base_domain = urlsplit(base_url).netloc
         self.max_pages = max_pages
         self.branch_name = branch_name or base_url
         self.block_wait = block_wait
-        self.headless = headless
         self.page_data: dict[str, PageData] = {}
         self.visited: set[str] = set()
+        self.user_agent = random.choice(USER_AGENTS)
+        self.scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
 
-    async def _maybe_wait_for_captcha(self, page: Page, url: str, html: str) -> str:
+    def _fetch(self, url: str, referer: str | None) -> tuple[str | None, int | None]:
+        try:
+            response = self.scraper.get(
+                url,
+                headers=_headers(self.user_agent, referer),
+                timeout=20,
+            )
+            status = response.status_code
+            if status in BLOCK_STATUSES:
+                print(f"Blocked HTTP {status} for {url}")
+                return None, status
+            if status > 399:
+                print(f"Error: HTTP {status} for {url}")
+                return None, status
+            content_type = response.headers.get("content-type", "")
+            if "text/html" not in content_type:
+                print(f"Error: Non-HTML content {content_type} for {url}")
+                return None, status
+            return response.text, status
+        except Exception as e:
+            print(f"Error fetching {url}: {e}")
+            return None, None
+
+    async def _handle_captcha(self, url: str, html: str) -> str:
         captcha_type = detect_captcha_type(html)
         if captcha_type is None:
             return html
-
         log_captcha(branch=self.branch_name, url=url, captcha_type=captcha_type)
         await asyncio.sleep(CAPTCHA_WAIT_SECONDS)
-        try:
-            return await page.content()
-        except Exception:
-            return html
-
-    async def _goto(self, page: Page, url: str) -> str | None:
-        try:
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            status = response.status if response is not None else None
-
-            if status in BLOCK_STATUSES:
-                print(
-                    f"Blocked HTTP {status} for {url}; waiting {self.block_wait}s"
-                )
-                await asyncio.sleep(self.block_wait)
-                return None
-
-            if status is not None and status > 399:
-                print(f"Error: HTTP {status} for {url}")
-                return None
-
-            html = await page.content()
-            return await self._maybe_wait_for_captcha(page, url, html)
-        except Exception as e:
-            print(f"Error fetching {url}: {e}")
-            return None
-
-    async def _launch_browser(self, playwright) -> Browser:
-        """Prefer system Chrome/Edge so Windows works without playwright browser download."""
-        launch_args = ["--disable-blink-features=AutomationControlled"]
-        errors: list[str] = []
-
-        for label, kwargs in (
-            ("system Chrome", {"channel": "chrome"}),
-            ("system Edge", {"channel": "msedge"}),
-            ("Playwright Chromium", {}),
-        ):
-            try:
-                browser = await playwright.chromium.launch(
-                    headless=self.headless,
-                    args=launch_args,
-                    **kwargs,
-                )
-                print(f"Browser launched via {label} (headless={self.headless})")
-                return browser
-            except Exception as e:
-                errors.append(f"{label}: {e}")
-
-        details = "\n".join(f"  - {err}" for err in errors)
-        raise RuntimeError(
-            "Could not launch a browser for humanize mode.\n"
-            "Install Google Chrome, or run:\n"
-            "  uv run playwright install chromium\n"
-            f"Tried:\n{details}"
-        )
+        return html
 
     async def crawl(self) -> dict[str, PageData]:
-        queue: deque[str] = deque([self.base_url])
+        print("[humanize] no-driver mode (cloudscraper, no Playwright)")
+        queue: deque[tuple[str, str | None]] = deque([(self.base_url, None)])
 
-        async with async_playwright() as playwright:
-            browser = await self._launch_browser(playwright)
-            context = await browser.new_context(
-                viewport={"width": 1365, "height": 900},
-                locale="en-US",
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                ),
+        while queue and len(self.visited) < self.max_pages:
+            current_url, referer = queue.popleft()
+
+            if not is_crawlable_url(current_url, self.base_domain):
+                continue
+
+            normalized = normalize_url(current_url)
+            if normalized in self.visited:
+                continue
+            self.visited.add(normalized)
+
+            print(
+                f"[humanize] Visiting {current_url} "
+                f"({len(self.visited)}/{self.max_pages})"
             )
-            await context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-            )
-            page = await context.new_page()
 
-            try:
-                while queue and len(self.visited) < self.max_pages:
-                    current_url = queue.popleft()
-
-                    if not is_crawlable_url(current_url, self.base_domain):
-                        continue
-
-                    normalized = normalize_url(current_url)
-                    if normalized in self.visited:
-                        continue
-                    self.visited.add(normalized)
-
-                    print(
-                        f"[humanize/browser] Visiting {current_url} "
-                        f"({len(self.visited)}/{self.max_pages})"
+            html, status = await asyncio.to_thread(self._fetch, current_url, referer)
+            if html is None:
+                if status in BLOCK_STATUSES:
+                    print(f"Waiting {self.block_wait}s after block...")
+                    await asyncio.sleep(self.block_wait)
+                    html, status = await asyncio.to_thread(
+                        self._fetch, current_url, referer
                     )
+                if html is None:
+                    continue
 
-                    html = await self._goto(page, current_url)
-                    if html is None:
-                        # One quick retry only after block wait already applied
-                        html = await self._goto(page, current_url)
-                        if html is None:
-                            continue
+            html = await self._handle_captcha(current_url, html)
+            self.page_data[normalized] = extract_page_data(html, current_url)
 
-                    self.page_data[normalized] = extract_page_data(html, current_url)
+            next_urls = [
+                u
+                for u in get_urls_from_html(html, current_url)
+                if is_crawlable_url(u, self.base_domain)
+            ]
+            next_urls.sort(key=_link_priority)
 
-                    next_urls = [
-                        u
-                        for u in get_urls_from_html(html, current_url)
-                        if is_crawlable_url(u, self.base_domain)
-                    ]
-                    next_urls.sort(key=_link_priority)
-
-                    for next_url in next_urls:
-                        norm = normalize_url(next_url)
-                        if norm in self.visited:
-                            continue
-                        if any(normalize_url(u) == norm for u in queue):
-                            continue
-                        queue.append(next_url)
-            finally:
-                await context.close()
-                await browser.close()
+            for next_url in next_urls:
+                norm = normalize_url(next_url)
+                if norm in self.visited:
+                    continue
+                if any(normalize_url(u) == norm for u, _ in queue):
+                    continue
+                queue.append((next_url, current_url))
 
         return self.page_data
 
@@ -201,12 +192,12 @@ async def crawl_site_human_async(
     max_pages: int,
     *,
     branch_name: str = "",
-    headless: bool = False,
+    headless: bool = False,  # kept for call-site compatibility; unused (no browser)
 ) -> dict[str, PageData]:
+    _ = headless
     crawler = HumanCrawler(
         base_url,
         max_pages,
         branch_name=branch_name,
-        headless=headless,
     )
     return await crawler.crawl()

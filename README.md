@@ -17,9 +17,6 @@ Put your spreadsheet in the project root (default name below), or pass `--xlsx`.
 cd web_crawler
 uv sync
 cp .env.example .env
-
-# Required once for --crawler humanize (visible Chromium)
-uv run playwright install chromium
 ```
 
 ## Batch crawl from XLSX
@@ -30,7 +27,7 @@ Reads `Branch/Association Name` + `Website` (+ sheet `Email` if present).
 # Bot crawler (fast async)
 uv run main.py --batch --crawler bot --concurrency 3 --max-pages 10
 
-# Humanize crawler (visible Chromium window, headless=False)
+# Humanize crawler (no browser driver — cloudscraper + human headers)
 uv run main.py --batch --crawler humanize --max-pages 10 --limit 5
 
 # Smoke-test first 5 rows only
@@ -82,7 +79,7 @@ uv run -m unittest
 |---|---|
 | `main.py` | CLI (`--batch`, `--redo`, single URL) |
 | `crawl.py` | Bot/async crawler + URL helpers |
-| `modules/human_crawler.py` | Visible Chromium crawler (`headless=False`) |
+| `modules/human_crawler.py` | No-driver humanize crawler (cloudscraper) |
 | `modules/email_extractor.py` | Emails from text + `mailto:` |
 | `modules/email_store.py` | Append `emails.json` by branch name |
 | `modules/tracker.py` | Skip/redo tracking |
