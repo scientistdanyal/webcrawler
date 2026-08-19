@@ -11,9 +11,9 @@ from bs4 import BeautifulSoup, Tag
 
 from modules.email_extractor import extract_emails_from_html
 from modules.captcha import (
-    CAPTCHA_WAIT_SECONDS,
     detect_captcha_type,
     log_captcha,
+    wait_seconds_for_captcha,
 )
 
 DEFAULT_USER_AGENT = (
@@ -310,8 +310,14 @@ class AsyncCrawler:
         captcha_type = detect_captcha_type(html)
         if captcha_type is None:
             return html
-        log_captcha(branch=self.branch_name, url=url, captcha_type=captcha_type)
-        await asyncio.sleep(CAPTCHA_WAIT_SECONDS)
+        wait_s = wait_seconds_for_captcha(captcha_type)
+        log_captcha(
+            branch=self.branch_name,
+            url=url,
+            captcha_type=captcha_type,
+            wait_seconds=wait_s,
+        )
+        await asyncio.sleep(wait_s)
         return html
 
     async def _fetch_aiohttp(self, url: str) -> tuple[str | None, int | None]:

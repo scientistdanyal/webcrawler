@@ -11,6 +11,7 @@ dependencies = [
     "cloudscraper>=1.2.71",
     "curl-cffi>=0.16.0",
     "msgspec>=0.21.1",
+    "nodriver>=0.50.3",
     "openpyxl>=3.1.5",
     "patchright>=1.62.1",
     "playwright>=1.62.0",

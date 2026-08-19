@@ -27,7 +27,7 @@ Reads `Branch/Association Name` + `Website` (+ sheet `Email` if present).
 # Bot crawler (fast async)
 uv run main.py --batch --crawler bot --concurrency 3 --max-pages 10
 
-# Humanize crawler (no browser driver — cloudscraper + human headers)
+# Humanize crawler (nodriver — undetected Chrome, no chromedriver)
 uv run main.py --batch --crawler humanize --max-pages 10 --limit 5
 
 # Smoke-test first 5 rows only
@@ -79,7 +79,7 @@ uv run -m unittest
 |---|---|
 | `main.py` | CLI (`--batch`, `--redo`, single URL) |
 | `crawl.py` | Bot/async crawler + URL helpers |
-| `modules/human_crawler.py` | No-driver humanize crawler (cloudscraper) |
+| `modules/human_crawler.py` | nodriver undetected Chrome crawler |
 | `modules/email_extractor.py` | Emails from text + `mailto:` |
 | `modules/email_store.py` | Append `emails.json` by branch name |
 | `modules/tracker.py` | Skip/redo tracking |

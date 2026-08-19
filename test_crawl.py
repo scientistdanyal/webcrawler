@@ -10,7 +10,7 @@ from crawl import (
 from modules.email_extractor import extract_emails_from_html
 from modules.email_store import EmailStore
 from modules.tracker import CrawlTracker
-from modules.captcha import detect_captcha_type
+from modules.captcha import detect_captcha_type, wait_seconds_for_captcha
 
 
 class TestCrawl(unittest.TestCase):
@@ -210,10 +210,12 @@ class TestCrawl(unittest.TestCase):
     def test_detect_captcha_cloudflare(self) -> None:
         html = "<html><title>Just a moment...</title><div id='cf-challenge'></div></html>"
         self.assertEqual(detect_captcha_type(html), "cloudflare")
+        self.assertEqual(wait_seconds_for_captcha("cloudflare"), 20)
 
     def test_detect_captcha_recaptcha(self) -> None:
         html = '<html><script src="https://www.google.com/recaptcha/api.js"></script></html>'
         self.assertEqual(detect_captcha_type(html), "recaptcha")
+        self.assertEqual(wait_seconds_for_captcha("recaptcha"), 10)
 
     def test_detect_captcha_none(self) -> None:
         html = "<html><body><h1>Brewton Area YMCA</h1><p>Contact us</p></body></html>"
