@@ -24,6 +24,8 @@ DEFAULT_USER_AGENT = (
 
 ERROR_BACKOFF_SECONDS = 5
 BLOCK_STATUSES = {403, 429, 503}
+MAX_PATH_DEPTH = 6
+MAX_SEGMENT_REPEATS = 2
 
 SKIP_EXTENSIONS = {
     ".pdf",
@@ -60,6 +62,56 @@ SKIP_EXTENSIONS = {
     ".eot",
 }
 
+TRAP_PATTERNS = (
+    # Calendar & date loops
+    r"/calendar(/|$)",
+    r"/events?/\d{4}",
+    r"/\d{4}/\d{1,2}/\d{1,2}",
+    r"/\d{4}/\d{2}(/|$)",
+    r"/month/\d{4}-\d{2}",
+    r"tribe_paged=",
+    r"eventdisplay=",
+    r"eventdate=",
+    # Deep pagination & endless feeds
+    r"/page/\d{2,}",
+    r"/p/\d{2,}",
+    r"/feed(/|$)",
+    r"/comments/feed",
+    r"/trackback",
+    # Tags & author archives
+    r"/tag/[^/]+(/|$)",
+    r"/author/[^/]+(/|$)",
+    r"/archives?/\d{4}",
+    # E-commerce, carts, accounts, auth, search
+    r"/cart(/|$)",
+    r"/checkout(/|$)",
+    r"/my-account",
+    r"/account(/|$)",
+    r"/login(/|$)",
+    r"/signup(/|$)",
+    r"/register(/|$)",
+    r"/wp-json(/|$)",
+    r"/wp-admin",
+    r"/xmlrpc\.php",
+    r"[?&](s|search|filter|sort|order|orderby)=",
+)
+
+PRIORITY_KEYWORDS = (
+    "contact",
+    "about",
+    "staff",
+    "team",
+    "leadership",
+    "board",
+    "directory",
+    "location",
+    "connect",
+    "reach",
+    "people",
+    "executive",
+    "office",
+)
+
 URL_IN_TEXT_RE = re.compile(
     r"""https?://[^\s<>\"'\)\]\},]+""",
     re.IGNORECASE,
@@ -90,6 +142,36 @@ def normalize_url(url: str) -> str:
     return full_path
 
 
+def is_spider_trap(url: str) -> bool:
+    """Detect infinite repeating directory segments or excessively deep paths."""
+    try:
+        parsed = urlsplit(url)
+        path = (parsed.path or "").strip("/").lower()
+        if not path:
+            return False
+        segments = [s for s in path.split("/") if s]
+        if len(segments) > MAX_PATH_DEPTH:
+            return True
+
+        counts: dict[str, int] = {}
+        for s in segments:
+            counts[s] = counts.get(s, 0) + 1
+            if counts[s] >= MAX_SEGMENT_REPEATS:
+                return True
+        return False
+    except Exception:
+        return True
+
+
+def get_link_priority(url: str) -> int:
+    """Assign lower numbers (higher priority) to contact/staff/about URLs."""
+    path = urlsplit(url).path.lower()
+    for i, keyword in enumerate(PRIORITY_KEYWORDS):
+        if keyword in path:
+            return i
+    return len(PRIORITY_KEYWORDS) + 1
+
+
 def is_crawlable_url(url: str, base_domain: str) -> bool:
     try:
         parsed = urlsplit(url)
@@ -105,6 +187,15 @@ def is_crawlable_url(url: str, base_domain: str) -> bool:
     for ext in SKIP_EXTENSIONS:
         if path.endswith(ext):
             return False
+
+    if is_spider_trap(url):
+        return False
+
+    url_lower = url.lower()
+    for pattern in TRAP_PATTERNS:
+        if re.search(pattern, url_lower):
+            return False
+
     return True
 
 
@@ -252,6 +343,8 @@ def _fetch_with_cloudscraper(url: str) -> tuple[str | None, int | None]:
 
 
 class AsyncCrawler:
+    """BFS priority-queue async crawler with circuit breakers and trap protection."""
+
     def __init__(
         self,
         base_url: str,
@@ -259,19 +352,25 @@ class AsyncCrawler:
         max_pages: int,
         *,
         branch_name: str = "",
+        max_consecutive_blocks: int = 5,
     ) -> None:
         self.base_url = base_url
         self.base_domain = urlsplit(base_url).netloc
         self.page_data: dict[str, PageData] = {}
         self.visited: set[str] = set()
+        self.enqueued: set[str] = set()
         self.lock = asyncio.Lock()
-        self.max_concurrency = max_concurrency
-        self.max_pages = max_pages
+        self.max_concurrency = max(1, max_concurrency)
+        self.max_pages = max(1, max_pages)
         self.should_stop = False
-        self.all_tasks: set[asyncio.Task[None]] = set()
-        self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.session: aiohttp.ClientSession | None = None
         self.branch_name = branch_name or base_url
+        self.max_consecutive_blocks = max_consecutive_blocks
+        self.consecutive_blocks = 0
+        self._seq = 0
+        self.queue: asyncio.PriorityQueue[tuple[int, int, str]] = (
+            asyncio.PriorityQueue()
+        )
 
     async def __aenter__(self) -> "AsyncCrawler":
         self.session = aiohttp.ClientSession()
@@ -286,21 +385,17 @@ class AsyncCrawler:
         if self.session is not None:
             await self.session.close()
 
-    async def add_page_visit(self, normalized_url: str) -> bool:
-        """Reserve a URL immediately so concurrent tasks cannot duplicate it."""
-        async with self.lock:
-            if self.should_stop:
-                return False
-            if normalized_url in self.visited:
-                return False
-            if len(self.visited) >= self.max_pages:
-                self.should_stop = True
-                print("Reached maximum number of pages to crawl.")
-                for task in self.all_tasks:
-                    task.cancel()
-                return False
-            self.visited.add(normalized_url)
-            return True
+    def _enqueue(self, url: str) -> bool:
+        if not is_crawlable_url(url, self.base_domain):
+            return False
+        norm = normalize_url(url)
+        if norm in self.visited or norm in self.enqueued:
+            return False
+        self.enqueued.add(norm)
+        priority = get_link_priority(url)
+        self._seq += 1
+        self.queue.put_nowait((priority, self._seq, url))
+        return True
 
     async def _backoff(self, reason: str) -> None:
         print(f"Backing off {ERROR_BACKOFF_SECONDS}s ({reason})")
@@ -342,16 +437,32 @@ class AsyncCrawler:
             return None, None
 
     async def get_html(self, url: str) -> str | None:
+        if self.should_stop:
+            return None
+
         html, status = await self._fetch_aiohttp(url)
         if html is not None:
             return await self._handle_captcha(url, html)
 
-        # Only pause when the site is actively blocking/rate-limiting
         if status in BLOCK_STATUSES:
             await self._backoff(f"blocked status={status}")
 
+        if self.should_stop:
+            return None
+
         print(f"Retrying with cloudscraper: {url}")
-        html, status = await asyncio.to_thread(_fetch_with_cloudscraper, url)
+        try:
+            html, status = await asyncio.wait_for(
+                asyncio.to_thread(_fetch_with_cloudscraper, url),
+                timeout=25,
+            )
+        except asyncio.TimeoutError:
+            print(f"Cloudscraper timed out for {url}")
+            return None
+        except Exception as e:
+            print(f"Cloudscraper error for {url}: {e}")
+            return None
+
         if html is not None:
             return await self._handle_captcha(url, html)
 
@@ -359,69 +470,99 @@ class AsyncCrawler:
             await self._backoff(f"cloudscraper blocked status={status}")
         return None
 
-    async def crawl_page(self, current_url: str) -> None:
-        if self.should_stop:
-            return
+    async def _worker(self) -> None:
+        while not self.should_stop:
+            try:
+                _priority, _seq, current_url = await self.queue.get()
+            except asyncio.CancelledError:
+                break
 
-        if not is_crawlable_url(current_url, self.base_domain):
-            return
+            normalized_url = normalize_url(current_url)
 
-        normalized_url = normalize_url(current_url)
-        is_new = await self.add_page_visit(normalized_url)
-        if not is_new:
-            return
-
-        async with self.semaphore:
-            if self.should_stop:
-                return
+            async with self.lock:
+                if self.should_stop or len(self.visited) >= self.max_pages:
+                    self.should_stop = True
+                    self.queue.task_done()
+                    break
+                if normalized_url in self.visited:
+                    self.queue.task_done()
+                    continue
+                self.visited.add(normalized_url)
+                current_count = len(self.visited)
 
             print(
                 f"Crawling {current_url} "
-                f"(visited {len(self.visited)}/{self.max_pages}, "
-                f"active {self.max_concurrency - self.semaphore._value})"
+                f"(visited {current_count}/{self.max_pages}, "
+                f"queue {self.queue.qsize()})"
             )
-            html = await self.get_html(current_url)
-            if html is None:
-                return
 
-            page_info = extract_page_data(html, current_url)
-            async with self.lock:
-                self.page_data[normalized_url] = page_info
+            try:
+                html = await self.get_html(current_url)
+            except Exception as e:
+                print(f"Error fetching {current_url}: {e}")
+                html = None
 
-            # Resolve relative links against the current page, not only the seed URL
-            next_urls = [
-                u
-                for u in get_urls_from_html(html, current_url)
-                if is_crawlable_url(u, self.base_domain)
-            ]
+            if html is not None:
+                self.consecutive_blocks = 0
+                page_info = extract_page_data(html, current_url)
+                async with self.lock:
+                    self.page_data[normalized_url] = page_info
 
-        # Deduplicate outgoing links before spawning tasks
-        unique_next: list[str] = []
-        seen_norms: set[str] = set()
-        for next_url in next_urls:
-            norm = normalize_url(next_url)
-            if norm in seen_norms or norm in self.visited:
-                continue
-            seen_norms.add(norm)
-            unique_next.append(next_url)
+                if len(self.visited) >= self.max_pages:
+                    self.should_stop = True
+                    self.queue.task_done()
+                    break
 
-        tasks: list[asyncio.Task[None]] = []
-        for next_url in unique_next:
+                next_urls = get_urls_from_html(html, current_url)
+                for next_url in next_urls:
+                    if self.should_stop:
+                        break
+                    self._enqueue(next_url)
+            else:
+                self.consecutive_blocks += 1
+                if self.consecutive_blocks >= self.max_consecutive_blocks:
+                    print(
+                        f"Circuit breaker triggered ({self.consecutive_blocks} consecutive blocked/failed requests). "
+                        f"Stopping crawl for {self.base_domain}."
+                    )
+                    self.should_stop = True
+
+            self.queue.task_done()
+
             if self.should_stop:
                 break
-            task = asyncio.create_task(self.crawl_page(next_url))
-            self.all_tasks.add(task)
-            tasks.append(task)
-
-        if tasks:
-            try:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            finally:
-                for task in tasks:
-                    self.all_tasks.discard(task)
 
     async def crawl(self) -> dict[str, PageData]:
-        await self.crawl_page(self.base_url)
+        self._enqueue(self.base_url)
+        if self.queue.empty():
+            return self.page_data
+
+        worker_count = min(self.max_concurrency, self.max_pages)
+        tasks = [
+            asyncio.create_task(self._worker(), name=f"crawler-worker-{i}")
+            for i in range(worker_count)
+        ]
+
+        queue_join_task = asyncio.create_task(self.queue.join())
+
+        while not self.should_stop and not self.queue.empty():
+            done, _ = await asyncio.wait(
+                [queue_join_task],
+                timeout=0.5,
+            )
+            if queue_join_task in done:
+                break
+            if len(self.visited) >= self.max_pages or self.should_stop:
+                self.should_stop = True
+                break
+
+        self.should_stop = True
+        if not queue_join_task.done():
+            queue_join_task.cancel()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
         return self.page_data
 
 
@@ -436,3 +577,4 @@ async def crawl_site_async(
         base_url, max_concurrency, max_pages, branch_name=branch_name
     ) as crawler:
         return await crawler.crawl()
+

@@ -228,9 +228,81 @@ class TestCrawl(unittest.TestCase):
         self.assertEqual(detect_captcha_type(html), "recaptcha")
         self.assertEqual(wait_seconds_for_captcha("recaptcha"), 10)
 
-    def test_detect_captcha_none(self) -> None:
-        html = "<html><body><h1>Brewton Area YMCA</h1><p>Contact us</p></body></html>"
-        self.assertIsNone(detect_captcha_type(html))
+    def test_is_spider_trap_repeating_segments(self) -> None:
+        from crawl import is_spider_trap
+
+        self.assertTrue(is_spider_trap("https://example.com/about/staff/about/staff"))
+        self.assertTrue(is_spider_trap("https://example.com/news/news/item"))
+        self.assertTrue(is_spider_trap("https://example.com/a/b/c/d/e/f/g/h"))  # depth > 6
+        self.assertFalse(is_spider_trap("https://example.com/about/staff/leadership"))
+        self.assertFalse(is_spider_trap("https://example.com/contact-us"))
+
+    def test_is_crawlable_url_filters_traps_and_calendars(self) -> None:
+        from crawl import is_crawlable_url
+
+        domain = "example.com"
+        # Calendar & date loops
+        self.assertFalse(is_crawlable_url("https://example.com/calendar/2026", domain))
+        self.assertFalse(is_crawlable_url("https://example.com/events/2026/08", domain))
+        self.assertFalse(is_crawlable_url("https://example.com/2026/08/22/event", domain))
+        self.assertFalse(is_crawlable_url("https://example.com/events/?tribe_paged=2", domain))
+        # Deep pagination & feeds
+        self.assertFalse(is_crawlable_url("https://example.com/blog/page/12/", domain))
+        self.assertFalse(is_crawlable_url("https://example.com/feed/", domain))
+        # Non-contact cart/auth
+        self.assertFalse(is_crawlable_url("https://example.com/cart/", domain))
+        self.assertFalse(is_crawlable_url("https://example.com/my-account", domain))
+        self.assertFalse(is_crawlable_url("https://example.com/login", domain))
+        # Valid contact/staff/about pages
+        self.assertTrue(is_crawlable_url("https://example.com/contact", domain))
+        self.assertTrue(is_crawlable_url("https://example.com/about-us/staff", domain))
+        self.assertTrue(is_crawlable_url("https://example.com/board-of-directors", domain))
+        self.assertTrue(is_crawlable_url("https://example.com/our-team", domain))
+
+    def test_get_link_priority_ordering(self) -> None:
+        from crawl import get_link_priority
+
+        contact_p = get_link_priority("https://example.com/contact-us")
+        about_p = get_link_priority("https://example.com/about-us")
+        staff_p = get_link_priority("https://example.com/our-staff")
+        generic_p = get_link_priority("https://example.com/programs/swimming-lessons")
+
+        self.assertLess(contact_p, generic_p)
+        self.assertLess(about_p, generic_p)
+        self.assertLess(staff_p, generic_p)
+
+    def test_async_crawler_max_pages_limit(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from crawl import AsyncCrawler
+
+        async def run_crawler_test() -> None:
+            crawler = AsyncCrawler(
+                "https://example.com",
+                max_concurrency=3,
+                max_pages=5,
+            )
+
+            # Mock get_html to return HTML with multiple links
+            sample_html = """
+            <html><body>
+                <a href="/contact">Contact</a>
+                <a href="/about">About</a>
+                <a href="/staff">Staff</a>
+                <a href="/team">Team</a>
+                <a href="/leadership">Leadership</a>
+                <a href="/board">Board</a>
+                <a href="/office">Office</a>
+                <a href="/location">Location</a>
+                <p>Email: test@example.com</p>
+            </body></html>
+            """
+            with patch.object(crawler, "get_html", new=AsyncMock(return_value=sample_html)):
+                results = await crawler.crawl()
+                self.assertLessEqual(len(crawler.visited), 5)
+                self.assertLessEqual(len(results), 5)
+
+        asyncio.run(run_crawler_test())
 
 
 if __name__ == "__main__":

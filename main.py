@@ -51,6 +51,7 @@ async def process_branch(
     crawler_mode: str,
     max_concurrency: int,
     max_pages: int,
+    site_timeout: int,
     email_store: EmailStore,
     tracker: CrawlTracker,
     force: bool = False,
@@ -61,15 +62,18 @@ async def process_branch(
 
     print(f"\n=== {branch.name} ===")
     website = prefer_https(branch.website)
-    print(f"Crawling: {website}")
+    print(f"Crawling: {website} (site timeout: {site_timeout}s)")
 
     try:
-        page_data = await crawl_with_mode(
-            website,
-            crawler_mode=crawler_mode,
-            max_concurrency=max_concurrency,
-            max_pages=max_pages,
-            branch_name=branch.name,
+        page_data = await asyncio.wait_for(
+            crawl_with_mode(
+                website,
+                crawler_mode=crawler_mode,
+                max_concurrency=max_concurrency,
+                max_pages=max_pages,
+                branch_name=branch.name,
+            ),
+            timeout=site_timeout,
         )
         emails = collect_emails(page_data, branch.sheet_email)
         merged = email_store.append(branch.name, emails)
@@ -80,6 +84,18 @@ async def process_branch(
             emails_found=len(merged),
         )
         print(f"Saved {len(merged)} email(s) for {branch.name}")
+    except asyncio.TimeoutError:
+        print(f"Timed out crawling {branch.name} after {site_timeout}s.")
+        emails = collect_emails({}, branch.sheet_email)
+        merged = email_store.append(branch.name, emails)
+        tracker.mark(
+            website,
+            name=branch.name,
+            status="timed_out",
+            emails_found=len(merged),
+            error=f"Timeout after {site_timeout}s",
+        )
+        print(f"Saved {len(merged)} email(s) from sheet for {branch.name} (timed out)")
     except Exception as e:
         tracker.mark(
             website,
@@ -107,6 +123,7 @@ async def run_batch(args: argparse.Namespace) -> None:
             crawler_mode=args.crawler,
             max_concurrency=args.concurrency,
             max_pages=args.max_pages,
+            site_timeout=args.site_timeout,
             email_store=email_store,
             tracker=tracker,
             force=False,
@@ -142,6 +159,7 @@ async def run_redo(args: argparse.Namespace) -> None:
         crawler_mode=args.crawler,
         max_concurrency=args.concurrency,
         max_pages=args.max_pages,
+        site_timeout=args.site_timeout,
         email_store=email_store,
         tracker=tracker,
         force=True,
@@ -149,14 +167,21 @@ async def run_redo(args: argparse.Namespace) -> None:
 
 
 async def run_single(args: argparse.Namespace) -> None:
-    print(f"Starting crawl of: {args.url}")
-    page_data = await crawl_with_mode(
-        args.url,
-        crawler_mode=args.crawler,
-        max_concurrency=args.concurrency,
-        max_pages=args.max_pages,
-        branch_name=prefer_https(args.url),
-    )
+    print(f"Starting crawl of: {args.url} (site timeout: {args.site_timeout}s)")
+    try:
+        page_data = await asyncio.wait_for(
+            crawl_with_mode(
+                args.url,
+                crawler_mode=args.crawler,
+                max_concurrency=args.concurrency,
+                max_pages=args.max_pages,
+                branch_name=prefer_https(args.url),
+            ),
+            timeout=args.site_timeout,
+        )
+    except asyncio.TimeoutError:
+        print(f"Timed out crawling {args.url} after {args.site_timeout}s.")
+        page_data = {}
     write_json_report(page_data, args.report_out)
     print(f"Wrote {args.report_out}")
 
@@ -204,6 +229,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Max pages to crawl per site (default: 10)",
+    )
+    parser.add_argument(
+        "--site-timeout",
+        type=int,
+        default=180,
+        help="Max seconds to crawl a single website before moving on (default: 180)",
     )
     parser.add_argument(
         "--emails-out",

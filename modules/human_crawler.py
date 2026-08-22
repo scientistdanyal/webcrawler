@@ -16,6 +16,7 @@ import nodriver as uc
 from crawl import (
     PageData,
     extract_page_data,
+    get_link_priority,
     get_urls_from_html,
     is_crawlable_url,
     normalize_url,
@@ -25,25 +26,6 @@ from modules.captcha import (
     log_captcha,
     wait_seconds_for_captcha,
 )
-
-PRIORITY_KEYWORDS = (
-    "contact",
-    "about",
-    "staff",
-    "team",
-    "directory",
-    "location",
-    "connect",
-    "reach",
-)
-
-
-def _link_priority(url: str) -> int:
-    path = urlsplit(url).path.lower()
-    for i, keyword in enumerate(PRIORITY_KEYWORDS):
-        if keyword in path:
-            return i
-    return len(PRIORITY_KEYWORDS) + 1
 
 
 class HumanCrawler:
@@ -56,24 +38,29 @@ class HumanCrawler:
         *,
         branch_name: str = "",
         headless: bool = False,
+        max_consecutive_blocks: int = 5,
     ) -> None:
         self.base_url = base_url
         self.base_domain = urlsplit(base_url).netloc
-        self.max_pages = max_pages
+        self.max_pages = max(1, max_pages)
         self.branch_name = branch_name or base_url
         self.headless = headless
+        self.max_consecutive_blocks = max_consecutive_blocks
+        self.consecutive_blocks = 0
         self.page_data: dict[str, PageData] = {}
         self.visited: set[str] = set()
 
     async def _get_html(self, tab: uc.Tab) -> str:
         try:
-            html = await tab.get_content()
+            html = await asyncio.wait_for(tab.get_content(), timeout=10)
             if isinstance(html, str) and html.strip():
                 return html
         except Exception:
             pass
         try:
-            html = await tab.evaluate("document.documentElement.outerHTML")
+            html = await asyncio.wait_for(
+                tab.evaluate("document.documentElement.outerHTML"), timeout=10
+            )
             if isinstance(html, str):
                 return html
         except Exception:
@@ -81,7 +68,7 @@ class HumanCrawler:
         return ""
 
     async def _scroll_page(self, tab: uc.Tab) -> None:
-        """Scroll to bottom in steps so lazy-loaded DOM (emails/links) can appear."""
+        """Scroll to bottom in bounded steps so lazy-loaded DOM (emails/links) can appear."""
         try:
             total_height = await tab.evaluate(
                 "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
@@ -95,25 +82,24 @@ class HumanCrawler:
 
             position = 0
             steps = 0
-            max_steps = 25
+            max_steps = 15
+            start_time = asyncio.get_event_loop().time()
+            max_duration = 5.0
+
             while position < total_height and steps < max_steps:
+                if asyncio.get_event_loop().time() - start_time > max_duration:
+                    break
                 position = min(position + int(viewport * 0.85), int(total_height))
                 await tab.evaluate(f"window.scrollTo(0, {position})")
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.2)
                 steps += 1
-                # Height can grow as lazy content loads
                 new_height = await tab.evaluate(
                     "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
                 )
                 if isinstance(new_height, (int, float)) and new_height > total_height:
-                    total_height = new_height
+                    # Bound maximum scrollable height to avoid infinite scroll loops
+                    total_height = min(new_height, 12000)
 
-            # Jump to absolute bottom, then brief settle for network/DOM updates
-            await tab.evaluate(
-                "window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight))"
-            )
-            await asyncio.sleep(0.6)
-            # Back to top so next navigation feels clean
             await tab.evaluate("window.scrollTo(0, 0)")
         except Exception as e:
             print(f"  (scroll skipped: {e})")
@@ -138,9 +124,9 @@ class HumanCrawler:
     ) -> tuple[uc.Tab | None, str | None]:
         try:
             if tab is None:
-                tab = await browser.get(url)
+                tab = await asyncio.wait_for(browser.get(url), timeout=25)
             else:
-                tab = await tab.get(url)
+                tab = await asyncio.wait_for(tab.get(url), timeout=25)
 
             html = await self._get_html(tab)
             if not html:
@@ -154,9 +140,12 @@ class HumanCrawler:
                     return tab, html
 
             print("  scrolling page for lazy-loaded content...")
-            await self._scroll_page(tab)
+            await asyncio.wait_for(self._scroll_page(tab), timeout=8)
             html = await self._get_html(tab)
             return tab, html
+        except asyncio.TimeoutError:
+            print(f"Timeout fetching {url} in browser")
+            return tab, None
         except Exception as e:
             print(f"Error fetching {url}: {e}")
             return tab, None
@@ -189,16 +178,27 @@ class HumanCrawler:
                     # Quick retry with no forced wait
                     tab, html = await self._goto(browser, tab, current_url)
                     if html is None:
+                        self.consecutive_blocks += 1
+                        if self.consecutive_blocks >= self.max_consecutive_blocks:
+                            print(
+                                f"Circuit breaker triggered ({self.consecutive_blocks} consecutive fails). "
+                                f"Stopping humanize crawl for {self.base_domain}."
+                            )
+                            break
                         continue
 
+                self.consecutive_blocks = 0
                 self.page_data[normalized] = extract_page_data(html, current_url)
+
+                if len(self.visited) >= self.max_pages:
+                    break
 
                 next_urls = [
                     u
                     for u in get_urls_from_html(html, current_url)
                     if is_crawlable_url(u, self.base_domain)
                 ]
-                next_urls.sort(key=_link_priority)
+                next_urls.sort(key=get_link_priority)
 
                 for next_url in next_urls:
                     norm = normalize_url(next_url)
@@ -230,3 +230,4 @@ async def crawl_site_human_async(
         headless=headless,
     )
     return await crawler.crawl()
+
