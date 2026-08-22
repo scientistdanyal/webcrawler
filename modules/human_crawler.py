@@ -8,6 +8,9 @@ Fast by default — waits only when a real Cloudflare/captcha challenge is prese
 from __future__ import annotations
 
 import asyncio
+import glob
+import os
+import shutil
 from collections import deque
 from urllib.parse import urlsplit
 
@@ -26,6 +29,27 @@ from modules.captcha import (
     log_captcha,
     wait_seconds_for_captcha,
 )
+
+BROWSER_ARGS = [
+    "--disk-cache-size=1048576",        # Limit disk cache to 1MB
+    "--media-cache-size=1048576",       # Limit media cache to 1MB
+    "--disable-gpu-shader-disk-cache",  # Do not write shader binaries to disk
+    "--disable-application-cache",
+    "--disable-component-update",
+    "--no-crash-upload",
+    "--disable-breakpad",
+]
+
+
+def cleanup_stale_uc_temp_dirs() -> None:
+    """Remove leftover nodriver temp directories from %TEMP% / $TMPDIR."""
+    import tempfile
+    temp_dir = tempfile.gettempdir()
+    for uc_dir in glob.glob(os.path.join(temp_dir, "uc_*")):
+        try:
+            shutil.rmtree(uc_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 class HumanCrawler:
@@ -152,11 +176,21 @@ class HumanCrawler:
 
     async def crawl(self) -> dict[str, PageData]:
         print("[humanize] starting nodriver Chrome (undetected, headless=False)")
+        cleanup_stale_uc_temp_dirs()
         queue: deque[str] = deque([self.base_url])
-        browser = await uc.start(headless=self.headless)
+        browser: uc.Browser | None = None
+        user_data_dir: str | None = None
         tab: uc.Tab | None = None
 
         try:
+            browser = await uc.start(
+                headless=self.headless,
+                browser_args=BROWSER_ARGS,
+            )
+            user_data_dir = getattr(
+                getattr(browser, "config", None), "user_data_dir", None
+            )
+
             while queue and len(self.visited) < self.max_pages:
                 current_url = queue.popleft()
 
@@ -208,10 +242,21 @@ class HumanCrawler:
                         continue
                     queue.append(next_url)
         finally:
-            try:
-                browser.stop()
-            except Exception:
-                pass
+            if browser is not None:
+                try:
+                    browser.stop()
+                except Exception:
+                    pass
+            # Force clean up user data directory if nodriver left it behind
+            if user_data_dir and os.path.exists(user_data_dir):
+                for _ in range(5):
+                    try:
+                        shutil.rmtree(user_data_dir, ignore_errors=True)
+                        if not os.path.exists(user_data_dir):
+                            break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.2)
 
         return self.page_data
 
@@ -230,4 +275,5 @@ async def crawl_site_human_async(
         headless=headless,
     )
     return await crawler.crawl()
+
 
